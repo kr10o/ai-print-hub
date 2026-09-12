@@ -2,7 +2,7 @@ import { useEffect, useState, ChangeEvent } from 'react';
 import { User } from 'firebase/auth';
 import { initAuth, googleSignIn, logout, db } from './firebase';
 import { collection, doc, setDoc, getDocs } from 'firebase/firestore';
-import { UploadCloud, FileText, Calendar, LogOut, FileSpreadsheet } from 'lucide-react';
+import { UploadCloud, FileText, Calendar, LogOut, FileSpreadsheet, Settings, HardDrive } from 'lucide-react';
 import Papa from 'papaparse';
 
 interface OrderItem {
@@ -34,7 +34,17 @@ export default function App() {
   
   const [orders, setOrders] = useState<ParsedOrder[]>([]);
   const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'simple' | 'custom'>('simple');
+  const [activeTab, setActiveTab] = useState<'simple' | 'custom' | 'settings'>('simple');
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('geminiApiKey') || '');
+  const [sheetId, setSheetId] = useState(() => localStorage.getItem('targetSpreadsheetId') || '');
+
+  useEffect(() => {
+    localStorage.setItem('geminiApiKey', apiKey);
+  }, [apiKey]);
+
+  useEffect(() => {
+    localStorage.setItem('targetSpreadsheetId', sheetId);
+  }, [sheetId]);
 
   useEffect(() => {
     const unsubscribe = initAuth(
@@ -98,7 +108,10 @@ export default function App() {
         try {
           const res = await fetch('/api/parse-orders', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+              'Content-Type': 'application/json',
+              ...(apiKey ? { 'x-gemini-api-key': apiKey } : {})
+            },
             body: JSON.stringify({ csvData: csvText })
           });
           
@@ -210,28 +223,11 @@ export default function App() {
 
   const handleExportToSheets = async () => {
     if (!token) return;
-    const confirmed = window.confirm('Export current orders to a new Google Sheet?');
+    const confirmed = window.confirm(sheetId ? 'Export current orders to targeted Google Sheet?' : 'Export current orders to a new Google Sheet?');
     if (!confirmed) return;
     
     try {
       setLoading(true);
-      const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          properties: {
-            title: `DTF Print Hub Export - ${new Date().toLocaleDateString()}`
-          }
-        })
-      });
-      if (!createRes.ok) throw new Error('Failed to create spreadsheet');
-      const sheetData = await createRes.json();
-      const spreadsheetId = sheetData.spreadsheetId;
-      const spreadsheetUrl = sheetData.spreadsheetUrl;
-      
       const rows = [
         ['Invoice Number', 'Client Name', 'Invoice Date', 'Total', 'Phone', 'Parsed Items Summary', 'Raw Description']
       ];
@@ -248,24 +244,112 @@ export default function App() {
           order.rawDescription
         ]);
       });
-      
-      const updateRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:G${rows.length}?valueInputOption=USER_ENTERED`, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          values: rows
-        })
-      });
-      if (!updateRes.ok) throw new Error('Failed to update spreadsheet');
-      
-      alert(`Successfully exported to Google Sheets!\nOpening in new tab...`);
-      window.open(spreadsheetUrl, '_blank');
+
+      if (sheetId) {
+        const appendRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Sheet1!A1:append?valueInputOption=USER_ENTERED`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ values: rows })
+        });
+        if (!appendRes.ok) throw new Error('Failed to append to spreadsheet');
+        alert('Successfully exported to Google Sheets!');
+        window.open(`https://docs.google.com/spreadsheets/d/${sheetId}`, '_blank');
+      } else {
+        const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            properties: {
+              title: `DTF Print Hub Export - ${new Date().toLocaleDateString()}`
+            }
+          })
+        });
+        if (!createRes.ok) throw new Error('Failed to create spreadsheet');
+        const sheetData = await createRes.json();
+        const spreadsheetId = sheetData.spreadsheetId;
+        const spreadsheetUrl = sheetData.spreadsheetUrl;
+        
+        const updateRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:G${rows.length}?valueInputOption=USER_ENTERED`, {
+          method: 'PUT',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            values: rows
+          })
+        });
+        if (!updateRes.ok) throw new Error('Failed to update spreadsheet');
+        
+        alert('Successfully exported to a new Google Sheet!\nOpening in new tab...');
+        window.open(spreadsheetUrl, '_blank');
+      }
     } catch (err) {
       console.error(err);
       alert('Error exporting to Google Sheets');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSaveToDrive = async () => {
+    if (!token) return;
+    const confirmed = window.confirm('Save parsed orders to Google Drive (in "Orders" folder)?');
+    if (!confirmed) return;
+    
+    try {
+      setLoading(true);
+      const searchRes = await fetch('https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and name='Orders' and trashed=false`), {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const searchData = await searchRes.json();
+      let folderId;
+      
+      if (searchData.files && searchData.files.length > 0) {
+        folderId = searchData.files[0].id;
+      } else {
+        const createFolderRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+          method: 'POST',
+          headers: { 
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            name: 'Orders',
+            mimeType: 'application/vnd.google-apps.folder'
+          })
+        });
+        const folderData = await createFolderRes.json();
+        folderId = folderData.id;
+      }
+      
+      const fileMetadata = {
+        name: `parsed_orders_${new Date().toISOString().slice(0,10)}.json`,
+        parents: [folderId]
+      };
+      const fileContent = JSON.stringify(activeTab === 'settings' ? orders : displayedOrders, null, 2);
+      
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify(fileMetadata)], { type: 'application/json' }));
+      form.append('file', new Blob([fileContent], { type: 'application/json' }));
+      
+      const uploadRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form
+      });
+      
+      if (!uploadRes.ok) throw new Error('Upload failed');
+      alert('Successfully saved to Google Drive "Orders" folder!');
+    } catch (err) {
+      console.error(err);
+      alert('Error saving to Google Drive');
     } finally {
       setLoading(false);
     }
@@ -323,22 +407,87 @@ export default function App() {
               Custom Orders ({customOrders.length})
             </button>
             
+            <button 
+              onClick={() => setActiveTab('settings')}
+              className={`px-4 py-3 text-left transition-colors uppercase tracking-wider ${activeTab === 'settings' ? 'bg-[var(--color-app-accent)]/20 text-[var(--color-app-accent)] border border-[var(--color-app-accent)]/50' : 'hover:bg-[var(--color-app-ink-faint)] border border-transparent'}`}
+            >
+              Settings
+            </button>
+            
             <hr className="border-[var(--color-app-ink-faint)] my-2" />
             
             <button 
               onClick={handleExportToSheets}
               disabled={loading || displayedOrders.length === 0}
-              className="flex items-center gap-3 px-4 py-3 text-left uppercase tracking-wider hover:bg-[var(--color-app-ink-faint)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex items-center gap-3 px-4 py-3 text-left uppercase tracking-wider hover:bg-[var(--color-app-ink-faint)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed group"
             >
               <FileSpreadsheet className="w-5 h-5 text-[var(--color-app-accent)]" />
               <span>Export to Sheets</span>
+            </button>
+
+            <button 
+              onClick={handleSaveToDrive}
+              disabled={loading || (activeTab !== 'settings' && displayedOrders.length === 0) || (activeTab === 'settings' && orders.length === 0)}
+              className="flex items-center gap-3 px-4 py-3 text-left uppercase tracking-wider hover:bg-[var(--color-app-ink-faint)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed group relative"
+            >
+              <HardDrive className="w-5 h-5 text-[var(--color-app-accent)]" />
+              <span>Save to Drive JSON</span>
             </button>
           </div>
         </div>
 
         <div className="md:col-span-3">
           <div className="border border-[var(--color-app-ink-faint)] bg-[var(--color-app-bg)] p-6 min-h-[600px]">
-            {displayedOrders.length === 0 ? (
+            {activeTab === 'settings' ? (
+              <div className="space-y-6">
+                <div className="border-b border-[var(--color-app-ink-faint)] pb-4">
+                  <h3 className="text-xl font-medium text-[var(--color-app-ink)] font-syne uppercase">Configuration</h3>
+                </div>
+                
+                <div className="space-y-4 max-w-lg">
+                  <div>
+                    <label className="block text-sm uppercase tracking-wider text-[rgba(242,239,235,0.6)] mb-2 font-space">
+                      Gemini API Key
+                      <span className="ml-2 group relative cursor-help">
+                        (ℹ)
+                        <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 hidden group-hover:block w-64 p-2 bg-[var(--color-app-ink-faint)] border border-[var(--color-app-ink)] text-xs text-[var(--color-app-ink)] backdrop-blur text-center z-10 font-space">
+                          Requires a valid Gemini API Key for parsing CSV files. Get yours at Google AI Studio.
+                        </span>
+                      </span>
+                    </label>
+                    <input 
+                      type="password" 
+                      value={apiKey} 
+                      onChange={(e) => setApiKey(e.target.value)} 
+                      placeholder="AIzaSy..." 
+                      className="w-full bg-[var(--color-app-bg)] border border-[var(--color-app-ink-faint)] text-[var(--color-app-ink)] p-3 focus:outline-none focus:border-[var(--color-app-accent)] font-space text-sm"
+                    />
+                    <a href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener noreferrer" className="inline-block mt-2 text-xs uppercase tracking-widest text-[var(--color-app-accent)] hover:underline font-space">
+                      Get API Key &rarr;
+                    </a>
+                  </div>
+
+                  <div className="pt-4">
+                    <label className="block text-sm uppercase tracking-wider text-[rgba(242,239,235,0.6)] mb-2 font-space">
+                      Target Google Sheet ID (Optional)
+                      <span className="ml-2 group relative cursor-help">
+                        (ℹ)
+                        <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 hidden group-hover:block w-64 p-2 bg-[var(--color-app-ink-faint)] border border-[var(--color-app-ink)] text-xs text-[var(--color-app-ink)] backdrop-blur text-center z-10 font-space">
+                          If provided, 'Export to Sheets' will append to this Spreadsheet ID instead of creating a new one.
+                        </span>
+                      </span>
+                    </label>
+                    <input 
+                      type="text" 
+                      value={sheetId} 
+                      onChange={(e) => setSheetId(e.target.value)} 
+                      placeholder="e.g. 1BxiMvs0XRYFgPNfa..." 
+                      className="w-full bg-[var(--color-app-bg)] border border-[var(--color-app-ink-faint)] text-[var(--color-app-ink)] p-3 focus:outline-none focus:border-[var(--color-app-accent)] font-space text-sm"
+                    />
+                  </div>
+                </div>
+              </div>
+            ) : displayedOrders.length === 0 ? (
               <div className="h-full flex items-center justify-center text-[rgba(242,239,235,0.4)] font-space uppercase">
                 No orders found in this category.
               </div>

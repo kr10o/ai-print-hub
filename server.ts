@@ -12,8 +12,6 @@ const isProd = process.env.NODE_ENV === 'production';
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
 // Parse orders using Gemini 3.5 Flash
 app.post('/api/parse-orders', async (req, res) => {
   try {
@@ -21,6 +19,15 @@ app.post('/api/parse-orders', async (req, res) => {
     if (!csvData) {
       return res.status(400).json({ error: 'Missing CSV data' });
     }
+
+    const clientApiKey = req.headers['x-gemini-api-key'] as string;
+    const apiKey = clientApiKey || process.env.GEMINI_API_KEY;
+
+    if (!apiKey) {
+      return res.status(401).json({ error: 'No Gemini API key provided. Please configure it in settings.' });
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
 
     const systemInstruction = `
 You are a DTF prepress and order parsing expert.
