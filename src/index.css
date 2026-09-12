@@ -153,3 +153,12 @@ body {
   display: inline-block;
   margin-right: 8px;
 }
+
+@keyframes parsing-progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+.animate-parsing-progress {
+  animation: parsing-progress 1.5s ease-in-out infinite;
+}

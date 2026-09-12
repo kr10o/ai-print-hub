@@ -2,10 +2,8 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import fs from 'fs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -86,20 +84,15 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     // Serve static files in production
-    app.use(express.static(path.join(__dirname, '..', 'client')));
-    app.use(express.static(path.join(__dirname, 'client')));
-    app.use(express.static(path.join(__dirname)));
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
     
-    app.use('*', (req, res) => {
-      let indexHtml = path.join(__dirname, 'index.html');
-      if (!fs.existsSync(indexHtml)) {
-        indexHtml = path.join(__dirname, 'client', 'index.html');
-      }
-      res.sendFile(indexHtml);
+    app.get('*all', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
-  app.listen(PORT, () => {
+  app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
   });
 }

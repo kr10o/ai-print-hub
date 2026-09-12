@@ -34,6 +34,7 @@ export default function App() {
   
   const [orders, setOrders] = useState<ParsedOrder[]>([]);
   const [loading, setLoading] = useState(false);
+  const [isParsing, setIsParsing] = useState(false);
   const [activeTab, setActiveTab] = useState<'simple' | 'custom' | 'settings'>('simple');
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('geminiApiKey') || '');
   const [sheetId, setSheetId] = useState(() => localStorage.getItem('targetSpreadsheetId') || '');
@@ -97,6 +98,7 @@ export default function App() {
     if (!e.target.files || e.target.files.length === 0) return;
     const file = e.target.files[0];
     setLoading(true);
+    setIsParsing(true);
     
     Papa.parse(file, {
       header: true,
@@ -146,6 +148,7 @@ export default function App() {
           alert('Failed to parse orders');
         } finally {
           setLoading(false);
+          setIsParsing(false);
         }
       }
     });
@@ -186,7 +189,20 @@ export default function App() {
   }
 
   const handleSchedule = async (order: ParsedOrder) => {
-    if (!token) return;
+    let currentToken = token;
+    if (!currentToken) {
+      try {
+        const authResult = await googleSignIn();
+        if (authResult) {
+          currentToken = authResult.accessToken;
+          setToken(currentToken);
+          setUser(authResult.user);
+        } else return;
+      } catch (e) {
+        alert('Authentication required to access Google Calendar.');
+        return;
+      }
+    }
     const confirmed = window.confirm(`Schedule production for ${order.clientName}?`);
     if (!confirmed) return;
 
@@ -207,7 +223,7 @@ export default function App() {
       const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
+          'Authorization': `Bearer ${currentToken}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(event)
@@ -222,8 +238,24 @@ export default function App() {
   };
 
   const handleExportToSheets = async () => {
-    if (!token) return;
-    const confirmed = window.confirm(sheetId ? 'Export current orders to targeted Google Sheet?' : 'Export current orders to a new Google Sheet?');
+    let currentToken = token;
+    if (!currentToken) {
+      try {
+        const authResult = await googleSignIn();
+        if (authResult) {
+          currentToken = authResult.accessToken;
+          setToken(currentToken);
+          setUser(authResult.user);
+        } else return;
+      } catch (e) {
+        alert('Authentication required to access Google Sheets.');
+        return;
+      }
+    }
+
+    const actualSheetId = sheetId.includes('/d/') ? sheetId.match(/\/d\/([a-zA-Z0-9-_]+)/)?.[1] || sheetId : sheetId;
+
+    const confirmed = window.confirm(actualSheetId ? 'Export current orders to targeted Google Sheet?' : 'Export current orders to a new Google Sheet?');
     if (!confirmed) return;
     
     try {
@@ -245,28 +277,28 @@ export default function App() {
         ]);
       });
 
-      if (sheetId) {
-        const appendRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Sheet1!A1:append?valueInputOption=USER_ENTERED`, {
+      if (actualSheetId) {
+        const appendRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${actualSheetId}/values/Sheet1!A1:append?valueInputOption=USER_ENTERED`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${token}`,
+            'Authorization': `Bearer ${currentToken}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({ values: rows })
         });
         if (!appendRes.ok) throw new Error('Failed to append to spreadsheet');
         alert('Successfully exported to Google Sheets!');
-        window.open(`https://docs.google.com/spreadsheets/d/${sheetId}`, '_blank');
+        window.open(`https://docs.google.com/spreadsheets/d/${actualSheetId}`, '_blank');
       } else {
         const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${token}`,
+            'Authorization': `Bearer ${currentToken}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
             properties: {
-              title: `DTF Print Hub Export - ${new Date().toLocaleDateString()}`
+              title: `DTF Print Hub Export`
             }
           })
         });
@@ -275,10 +307,12 @@ export default function App() {
         const spreadsheetId = sheetData.spreadsheetId;
         const spreadsheetUrl = sheetData.spreadsheetUrl;
         
+        setSheetId(spreadsheetId);
+        
         const updateRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:G${rows.length}?valueInputOption=USER_ENTERED`, {
           method: 'PUT',
           headers: {
-            'Authorization': `Bearer ${token}`,
+            'Authorization': `Bearer ${currentToken}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
@@ -299,14 +333,28 @@ export default function App() {
   };
 
   const handleSaveToDrive = async () => {
-    if (!token) return;
+    let currentToken = token;
+    if (!currentToken) {
+      try {
+        const authResult = await googleSignIn();
+        if (authResult) {
+          currentToken = authResult.accessToken;
+          setToken(currentToken);
+          setUser(authResult.user);
+        } else return;
+      } catch (e) {
+        alert('Authentication required to access Google Drive.');
+        return;
+      }
+    }
+
     const confirmed = window.confirm('Save parsed orders to Google Drive (in "Orders" folder)?');
     if (!confirmed) return;
     
     try {
       setLoading(true);
       const searchRes = await fetch('https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and name='Orders' and trashed=false`), {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${currentToken}` }
       });
       const searchData = await searchRes.json();
       let folderId;
@@ -317,7 +365,7 @@ export default function App() {
         const createFolderRes = await fetch('https://www.googleapis.com/drive/v3/files', {
           method: 'POST',
           headers: { 
-            Authorization: `Bearer ${token}`,
+            Authorization: `Bearer ${currentToken}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
@@ -330,19 +378,31 @@ export default function App() {
       }
       
       const fileMetadata = {
-        name: `parsed_orders_${new Date().toISOString().slice(0,10)}.json`,
+        name: `parsed_orders_${Date.now()}.json`,
         parents: [folderId]
       };
       const fileContent = JSON.stringify(activeTab === 'settings' ? orders : displayedOrders, null, 2);
       
-      const form = new FormData();
-      form.append('metadata', new Blob([JSON.stringify(fileMetadata)], { type: 'application/json' }));
-      form.append('file', new Blob([fileContent], { type: 'application/json' }));
-      
-      const uploadRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+      // Step 1: Create the file metadata
+      const createRes = await fetch('https://www.googleapis.com/drive/v3/files', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: form
+        headers: {
+          Authorization: `Bearer ${currentToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(fileMetadata)
+      });
+      if (!createRes.ok) throw new Error('Failed to create file metadata');
+      const createdFile = await createRes.json();
+
+      // Step 2: Upload the media content
+      const uploadRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${createdFile.id}?uploadType=media`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${currentToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: fileContent
       });
       
       if (!uploadRes.ok) throw new Error('Upload failed');
@@ -386,10 +446,16 @@ export default function App() {
             />
             <label 
               htmlFor="csv-upload" 
-              className={`flex flex-col items-center justify-center gap-4 cursor-pointer p-6 border border-dashed ${loading ? 'border-gray-600 opacity-50' : 'border-[var(--color-app-accent)] hover:bg-[var(--color-app-accent)]/10 transition-colors'}`}
+              className={`flex flex-col items-center justify-center gap-4 cursor-pointer p-6 border border-dashed relative overflow-hidden ${loading ? 'border-gray-600 opacity-50' : 'border-[var(--color-app-accent)] hover:bg-[var(--color-app-accent)]/10 transition-colors'}`}
             >
-              <UploadCloud className="w-10 h-10 text-[var(--color-app-accent)]" />
-              <span className="text-sm uppercase tracking-wider font-space">{loading ? 'Parsing...' : 'Upload CSV'}</span>
+              <UploadCloud className={`w-10 h-10 ${isParsing ? 'text-gray-500 animate-pulse' : 'text-[var(--color-app-accent)]'}`} />
+              <span className="text-sm uppercase tracking-wider font-space text-center z-10">
+                {isParsing ? 'Parsing via Gemini...' : 'Upload CSV'}
+              </span>
+              
+              {isParsing && (
+                <div className="absolute bottom-0 left-0 h-1 bg-[var(--color-app-accent)] animate-parsing-progress w-1/2"></div>
+              )}
             </label>
           </div>
           
