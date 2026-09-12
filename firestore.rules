@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() { return request.auth != null; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    function isValidOrder(data) {
+      return data.keys().hasAll(['userId', 'invoiceNumber', 'clientName', 'createdAt']) &&
+             data.userId == request.auth.uid &&
+             data.userId is string && data.userId.size() <= 128 &&
+             data.invoiceNumber is string && data.invoiceNumber.size() <= 100 &&
+             data.clientName is string && data.clientName.size() <= 200 &&
+             (!data.keys().hasAny(['oib']) || (data.oib is string && data.oib.size() <= 50)) &&
+             (!data.keys().hasAny(['total']) || (data.total is string && data.total.size() <= 50)) &&
+             (!data.keys().hasAny(['invoiceDate']) || (data.invoiceDate is string && data.invoiceDate.size() <= 50)) &&
+             (!data.keys().hasAny(['paymentDate']) || (data.paymentDate is string && data.paymentDate.size() <= 50)) &&
+             (!data.keys().hasAny(['rawDescription']) || (data.rawDescription is string && data.rawDescription.size() <= 5000)) &&
+             (!data.keys().hasAny(['isCustom']) || data.isCustom is bool) &&
+             (!data.keys().hasAny(['contactPhone']) || (data.contactPhone is string && data.contactPhone.size() <= 50)) &&
+             (!data.keys().hasAny(['parsedItemsJson']) || (data.parsedItemsJson is string && data.parsedItemsJson.size() <= 10000)) &&
+             data.createdAt is number &&
+             (!data.keys().hasAny(['updatedAt']) || data.updatedAt is number);
+    }
+
+    match /users/{userId}/orders/{orderId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow create: if isSignedIn() && request.auth.uid == userId &&
+                       isValidId(userId) && isValidId(orderId) &&
+                       isValidOrder(incoming()) &&
+                       incoming().keys().size() <= 13;
+      allow update: if isSignedIn() && request.auth.uid == userId &&
+                       isValidId(userId) && isValidId(orderId) &&
+                       isValidOrder(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt;
+      allow delete: if isSignedIn() && request.auth.uid == userId &&
+                       isValidId(userId) && isValidId(orderId);
+    }
+  }
+}

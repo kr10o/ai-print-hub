@@ -1,0 +1,31 @@
+{
+  "entities": {
+    "Order": {
+      "title": "Order",
+      "description": "Represents a parsed DTF/Promo order",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "invoiceNumber": { "type": "string", "maxLength": 100 },
+        "clientName": { "type": "string", "maxLength": 200 },
+        "oib": { "type": "string", "maxLength": 50 },
+        "total": { "type": "string", "maxLength": 50 },
+        "invoiceDate": { "type": "string", "maxLength": 50 },
+        "paymentDate": { "type": "string", "maxLength": 50 },
+        "rawDescription": { "type": "string", "maxLength": 5000 },
+        "isCustom": { "type": "boolean" },
+        "contactPhone": { "type": "string", "maxLength": 50 },
+        "parsedItemsJson": { "type": "string", "maxLength": 10000 },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["userId", "invoiceNumber", "clientName", "createdAt"]
+    }
+  },
+  "firestore": {
+    "users/{userId}/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Orders uploaded and parsed by the user"
+    }
+  }
+}
