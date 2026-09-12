@@ -46,7 +46,8 @@ body {
   border-right: 1.5px solid var(--color-app-ink);
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
+  justify-content: flex-end;
+  gap: 3vw;
   padding: 4vw;
   position: relative;
 }
@@ -61,7 +62,7 @@ body {
 .form-pane {
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-end;
   align-items: flex-start;
   padding: 8vw;
 }
@@ -83,6 +84,7 @@ body {
   text-transform: uppercase;
   margin-left: -0.05em;
   color: var(--color-app-ink);
+  vertical-align: bottom;
 }
 
 .meta-footer {
