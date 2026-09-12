@@ -1,6 +1,6 @@
 {
-  "name": "",
-  "description": "",
+  "name": "DTF Print Hub",
+  "description": "Production portal for DTF Print Hub with order processing, prepress preparation, and Google Workspace integrations.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

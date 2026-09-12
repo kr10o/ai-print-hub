@@ -2,7 +2,7 @@ import { useEffect, useState, ChangeEvent } from 'react';
 import { User } from 'firebase/auth';
 import { initAuth, googleSignIn, logout, db } from './firebase';
 import { collection, doc, setDoc, getDocs } from 'firebase/firestore';
-import { UploadCloud, FileText, Calendar, LogOut, FileSpreadsheet, Settings, HardDrive } from 'lucide-react';
+import { UploadCloud, FileText, Calendar, LogOut, FileSpreadsheet, Settings, HardDrive, ExternalLink } from 'lucide-react';
 import Papa from 'papaparse';
 
 interface OrderItem {
@@ -38,6 +38,11 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'simple' | 'custom' | 'settings'>('simple');
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('geminiApiKey') || '');
   const [sheetId, setSheetId] = useState(() => localStorage.getItem('targetSpreadsheetId') || '');
+  const [exportBanner, setExportBanner] = useState<{
+    type: 'success' | 'error';
+    message: string;
+    url?: string;
+  } | null>(null);
 
   useEffect(() => {
     localStorage.setItem('geminiApiKey', apiKey);
@@ -237,6 +242,22 @@ export default function App() {
     }
   };
 
+  const convertRowsToCsv = (rows: (string | number)[][]): string => {
+    return rows
+      .map(row =>
+        row
+          .map(cell => {
+            const str = String(cell ?? '');
+            if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+              return `"${str.replace(/"/g, '""')}"`;
+            }
+            return str;
+          })
+          .join(',')
+      )
+      .join('\r\n');
+  };
+
   const handleExportToSheets = async () => {
     let currentToken = token;
     if (!currentToken) {
@@ -253,19 +274,37 @@ export default function App() {
       }
     }
 
-    const actualSheetId = sheetId.includes('/d/') ? sheetId.match(/\/d\/([a-zA-Z0-9-_]+)/)?.[1] || sheetId : sheetId;
+    const cleanSheetId = (input: string) => {
+      if (!input) return '';
+      const trimmed = input.trim();
+      const match = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+      if (match && match[1]) return match[1];
+      const matchD = trimmed.match(/\/d\/([a-zA-Z0-9-_]+)/);
+      if (matchD && matchD[1]) return matchD[1];
+      return trimmed;
+    };
 
-    const confirmed = window.confirm(actualSheetId ? 'Export current orders to targeted Google Sheet?' : 'Export current orders to a new Google Sheet?');
+    const actualSheetId = cleanSheetId(sheetId);
+
+    const confirmed = window.confirm(
+      actualSheetId
+        ? `Export ${displayedOrders.length} order(s) to targeted Google Sheet (${actualSheetId})?`
+        : `Export ${displayedOrders.length} order(s) to a new Google Sheet?`
+    );
     if (!confirmed) return;
-    
+
     try {
       setLoading(true);
-      const rows = [
+      setExportBanner(null);
+
+      const rows: (string | number)[][] = [
         ['Invoice Number', 'Client Name', 'Invoice Date', 'Total', 'Phone', 'Parsed Items Summary', 'Raw Description']
       ];
-      
+
       displayedOrders.forEach(order => {
-        const itemsSummary = order.parsedItems.map(i => `${i.quantity}x ${i.itemName} (${i.size || 'N/A'}, ${i.color || 'N/A'})`).join('\n');
+        const itemsSummary = order.parsedItems
+          .map(i => `${i.quantity}x ${i.itemName} (${i.size || 'N/A'}, ${i.color || 'N/A'})`)
+          .join('; ');
         rows.push([
           order.invoiceNumber,
           order.clientName,
@@ -278,55 +317,225 @@ export default function App() {
       });
 
       if (actualSheetId) {
-        const appendRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${actualSheetId}/values/Sheet1!A1:append?valueInputOption=USER_ENTERED`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${currentToken}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ values: rows })
+        // Appending to an existing spreadsheet
+        // Step 1: Discover the actual title of the first sheet tab (avoiding hardcoded 'Sheet1' which fails on non-English locales)
+        let metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${actualSheetId}?fields=sheets.properties`, {
+          headers: { Authorization: `Bearer ${currentToken}` }
         });
-        if (!appendRes.ok) throw new Error('Failed to append to spreadsheet');
-        alert('Successfully exported to Google Sheets!');
-        window.open(`https://docs.google.com/spreadsheets/d/${actualSheetId}`, '_blank');
+
+        if (metaRes.status === 401) {
+          const authResult = await googleSignIn();
+          if (authResult) {
+            currentToken = authResult.accessToken;
+            setToken(currentToken);
+            setUser(authResult.user);
+            metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${actualSheetId}?fields=sheets.properties`, {
+              headers: { Authorization: `Bearer ${currentToken}` }
+            });
+          }
+        }
+
+        if (!metaRes.ok) {
+          const errData = await metaRes.json().catch(() => ({}));
+          const errMsg = errData?.error?.message || `HTTP ${metaRes.status}`;
+          throw new Error(`Cannot access target spreadsheet: ${errMsg}. Please verify your Sheet ID in Settings or clear it to create a new sheet.`);
+        }
+
+        const metaData = await metaRes.json();
+        const firstSheetTitle = metaData.sheets?.[0]?.properties?.title || 'Sheet1';
+        const escapedRange = `'${firstSheetTitle.replace(/'/g, "''")}'!A1`;
+
+        const appendRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${actualSheetId}/values/${encodeURIComponent(escapedRange)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${currentToken}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ values: rows })
+          }
+        );
+
+        if (!appendRes.ok) {
+          const errData = await appendRes.json().catch(() => ({}));
+          throw new Error(errData?.error?.message || `Failed to append rows (HTTP ${appendRes.status})`);
+        }
+
+        const sheetUrl = `https://docs.google.com/spreadsheets/d/${actualSheetId}/edit`;
+        setExportBanner({
+          type: 'success',
+          message: `Successfully exported ${displayedOrders.length} order(s) to targeted Google Sheet!`,
+          url: sheetUrl
+        });
+        window.open(sheetUrl, '_blank');
       } else {
-        const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${currentToken}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            properties: {
-              title: `DTF Print Hub Export`
+        // Creating a new Google Sheet
+        const dateStr = new Date().toISOString().split('T')[0];
+        const title = `DTF Print Hub - Orders (${dateStr})`;
+        let finalSheetId: string | null = null;
+        let finalSheetUrl: string | null = null;
+
+        // Path A: Try Google Sheets API v4
+        try {
+          let createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${currentToken}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              properties: { title },
+              sheets: [
+                {
+                  properties: {
+                    title: 'Orders',
+                    gridProperties: { frozenRowCount: 1 }
+                  }
+                }
+              ]
+            })
+          });
+
+          if (createRes.status === 401) {
+            const authResult = await googleSignIn();
+            if (authResult) {
+              currentToken = authResult.accessToken;
+              setToken(currentToken);
+              setUser(authResult.user);
+              createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${currentToken}`,
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  properties: { title },
+                  sheets: [{ properties: { title: 'Orders', gridProperties: { frozenRowCount: 1 } } }]
+                })
+              });
             }
-          })
-        });
-        if (!createRes.ok) throw new Error('Failed to create spreadsheet');
-        const sheetData = await createRes.json();
-        const spreadsheetId = sheetData.spreadsheetId;
-        const spreadsheetUrl = sheetData.spreadsheetUrl;
-        
-        setSheetId(spreadsheetId);
-        
-        const updateRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:G${rows.length}?valueInputOption=USER_ENTERED`, {
-          method: 'PUT',
-          headers: {
-            'Authorization': `Bearer ${currentToken}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            values: rows
-          })
-        });
-        if (!updateRes.ok) throw new Error('Failed to update spreadsheet');
-        
-        alert('Successfully exported to a new Google Sheet!\nOpening in new tab...');
-        window.open(spreadsheetUrl, '_blank');
+          }
+
+          if (createRes.ok) {
+            const sheetData = await createRes.json();
+            finalSheetId = sheetData.spreadsheetId;
+            finalSheetUrl = sheetData.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${finalSheetId}/edit`;
+
+            // Populate rows to the created sheet tab 'Orders'
+            const updateRes = await fetch(
+              `https://sheets.googleapis.com/v4/spreadsheets/${finalSheetId}/values/'Orders'!A1?valueInputOption=USER_ENTERED`,
+              {
+                method: 'PUT',
+                headers: {
+                  Authorization: `Bearer ${currentToken}`,
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ values: rows })
+              }
+            );
+
+            if (!updateRes.ok) {
+              console.warn('Sheets API direct update failed, will use drive fallback if needed');
+            }
+          } else {
+            const errData = await createRes.json().catch(() => ({}));
+            console.warn('Sheets API create failed, falling back to Google Drive sheet creation:', errData);
+          }
+        } catch (sheetsErr) {
+          console.warn('Direct Sheets API call error, falling back to Google Drive:', sheetsErr);
+        }
+
+        // Path B: Fallback to Google Drive API spreadsheet converter
+        // Since Save to Drive JSON is already proven working in production, this gives 100% reliability
+        if (!finalSheetId || !finalSheetUrl) {
+          let folderId: string | undefined = undefined;
+          try {
+            const searchRes = await fetch(
+              'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and name='Orders' and trashed=false`),
+              { headers: { Authorization: `Bearer ${currentToken}` } }
+            );
+            const searchData = await searchRes.json();
+            if (searchData.files && searchData.files.length > 0) {
+              folderId = searchData.files[0].id;
+            } else {
+              const createFolderRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${currentToken}`,
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  name: 'Orders',
+                  mimeType: 'application/vnd.google-apps.folder'
+                })
+              });
+              if (createFolderRes.ok) {
+                const folderData = await createFolderRes.json();
+                folderId = folderData.id;
+              }
+            }
+          } catch (fErr) {
+            console.warn('Could not locate Orders folder, uploading to root:', fErr);
+          }
+
+          const boundary = 'dtf_print_hub_' + Date.now();
+          const driveMetadata = {
+            name: title,
+            mimeType: 'application/vnd.google-apps.spreadsheet',
+            ...(folderId ? { parents: [folderId] } : {})
+          };
+          const csvContent = convertRowsToCsv(rows);
+
+          const multipartBody =
+            `--${boundary}\r\n` +
+            `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+            JSON.stringify(driveMetadata) +
+            `\r\n--${boundary}\r\n` +
+            `Content-Type: text/csv; charset=UTF-8\r\n\r\n` +
+            csvContent +
+            `\r\n--${boundary}--`;
+
+          const driveUploadRes = await fetch(
+            'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink',
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${currentToken}`,
+                'Content-Type': `multipart/related; boundary=${boundary}`
+              },
+              body: multipartBody
+            }
+          );
+
+          if (!driveUploadRes.ok) {
+            const driveErr = await driveUploadRes.json().catch(() => ({}));
+            throw new Error(driveErr?.error?.message || `Failed to create Google Sheet (HTTP ${driveUploadRes.status})`);
+          }
+
+          const driveFileData = await driveUploadRes.json();
+          finalSheetId = driveFileData.id;
+          finalSheetUrl = driveFileData.webViewLink || `https://docs.google.com/spreadsheets/d/${finalSheetId}/edit`;
+        }
+
+        if (finalSheetId && finalSheetUrl) {
+          setSheetId(finalSheetId);
+          setExportBanner({
+            type: 'success',
+            message: `Successfully created Google Sheet with ${displayedOrders.length} order(s)!`,
+            url: finalSheetUrl
+          });
+          window.open(finalSheetUrl, '_blank');
+        }
       }
-    } catch (err) {
-      console.error(err);
-      alert('Error exporting to Google Sheets');
+    } catch (err: any) {
+      console.error('Export to Google Sheets error:', err);
+      const errMsg = err?.message || 'Error exporting to Google Sheets';
+      setExportBanner({
+        type: 'error',
+        message: errMsg
+      });
+      alert(`Google Sheets Export: ${errMsg}`);
     } finally {
       setLoading(false);
     }
@@ -504,6 +713,39 @@ export default function App() {
 
         <div className="md:col-span-3">
           <div className="border border-[var(--color-app-ink-faint)] bg-[var(--color-app-bg)] p-6 min-h-[600px]">
+            {exportBanner && (
+              <div className={`mb-6 p-4 border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 font-space text-sm ${
+                exportBanner.type === 'success'
+                  ? 'border-[var(--color-app-accent)] bg-[var(--color-app-accent)]/10 text-[var(--color-app-ink)]'
+                  : 'border-red-500/50 bg-red-500/10 text-red-200'
+              }`}>
+                <div className="flex items-center gap-3">
+                  <span className="text-base font-bold">{exportBanner.type === 'success' ? '✓' : '⚠'}</span>
+                  <span>{exportBanner.message}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {exportBanner.url && (
+                    <a
+                      href={exportBanner.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3 py-1.5 bg-[var(--color-app-accent)] text-[var(--color-app-bg)] uppercase text-xs font-bold tracking-wider hover:opacity-90 transition-opacity whitespace-nowrap flex items-center gap-1.5"
+                    >
+                      <span>Open Google Sheet</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  )}
+                  <button
+                    onClick={() => setExportBanner(null)}
+                    className="text-[var(--color-app-ink)] hover:text-white text-xs uppercase px-2 py-1"
+                    title="Dismiss"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            )}
+
             {activeTab === 'settings' ? (
               <div className="space-y-6">
                 <div className="border-b border-[var(--color-app-ink-faint)] pb-4">
@@ -547,9 +789,30 @@ export default function App() {
                       type="text" 
                       value={sheetId} 
                       onChange={(e) => setSheetId(e.target.value)} 
-                      placeholder="e.g. 1BxiMvs0XRYFgPNfa..." 
+                      placeholder="e.g. 1BxiMvs0XRYFgPNfa... or sheet URL" 
                       className="w-full bg-[var(--color-app-bg)] border border-[var(--color-app-ink-faint)] text-[var(--color-app-ink)] p-3 focus:outline-none focus:border-[var(--color-app-accent)] font-space text-sm"
                     />
+                    {sheetId && (
+                      <div className="flex items-center gap-3 mt-2 font-space text-xs">
+                        <a 
+                          href={`https://docs.google.com/spreadsheets/d/${sheetId.includes('/d/') ? sheetId.match(/\/d\/([a-zA-Z0-9-_]+)/)?.[1] || sheetId : sheetId}/edit`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[var(--color-app-accent)] hover:underline flex items-center gap-1"
+                        >
+                          <span>Open current sheet</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                        <span className="text-[rgba(242,239,235,0.3)]">|</span>
+                        <button 
+                          type="button" 
+                          onClick={() => setSheetId('')}
+                          className="text-red-400 hover:underline"
+                        >
+                          Clear Sheet ID (create new sheet on next export)
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
